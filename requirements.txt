@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlmodel>=0.0.16
+psycopg2-binary>=2.9
+cryptography>=42.0
+python-dotenv>=1.0
+python-multipart>=0.0.9
+requests>=2.31

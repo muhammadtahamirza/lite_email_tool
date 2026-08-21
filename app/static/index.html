@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Outreach Dashboard</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2133; --border:#2a3350; --text:#e8ecf5; --muted:#8a93ac; --accent:#5b8cff; --good:#3ecf8e; --bad:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding: 20px 28px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  main { max-width: 980px; margin: 0 auto; padding: 28px; display:grid; gap:24px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; }
+  .card h2 { margin:0 0 14px; font-size:15px; color:var(--muted); text-transform:uppercase; letter-spacing:0.04em; }
+  .stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  .stat { background:#141a2b; border-radius:10px; padding:14px; }
+  .stat .num { font-size:26px; font-weight:700; }
+  .stat .label { font-size:12px; color:var(--muted); margin-top:4px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; }
+  .badge { padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
+  .badge.good { background:rgba(62,207,142,0.15); color:var(--good); }
+  .badge.bad { background:rgba(255,107,107,0.15); color:var(--bad); }
+  input, select, textarea { background:#0f1420; border:1px solid var(--border); color:var(--text); border-radius:8px; padding:9px 12px; font-size:14px; width:100%; }
+  textarea { min-height:110px; font-family: inherit; resize:vertical; }
+  label { font-size:12px; color:var(--muted); display:block; margin-bottom:5px; margin-top:12px; }
+  button { background:var(--accent); color:white; border:none; border-radius:8px; padding:10px 16px; font-size:14px; cursor:pointer; margin-top:16px; }
+  button:hover { opacity:0.9; }
+  button.secondary { background:transparent; border:1px solid var(--border); color:var(--text); }
+  .row { display:flex; gap:10px; align-items:center; }
+  .msg { font-size:13px; margin-top:10px; padding:8px 12px; border-radius:8px; }
+  .msg.ok { background:rgba(62,207,142,0.12); color:var(--good); }
+  .msg.err { background:rgba(255,107,107,0.12); color:var(--bad); }
+  .file-drop { border:1px dashed var(--border); border-radius:10px; padding:24px; text-align:center; color:var(--muted); cursor:pointer; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Outreach Dashboard</h1>
+  <span id="auth-status" style="font-size:12px;color:var(--muted)"></span>
+</header>
+
+<main>
+
+  <div class="card">
+    <h2>Stats</h2>
+    <div class="stat-grid" id="stats-grid">
+      <div class="stat"><div class="num">–</div><div class="label">Total sent</div></div>
+      <div class="stat"><div class="num">–</div><div class="label">Reply rate</div></div>
+      <div class="stat"><div class="num">–</div><div class="label">Interested</div></div>
+      <div class="stat"><div class="num">–</div><div class="label">Trials started</div></div>
+    </div>
+    <table id="by-template-table" style="margin-top:18px">
+      <thead><tr><th>Template</th><th>Sent</th><th>Replied</th><th>Reply rate</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="grid-2">
+
+    <div class="card">
+      <h2>Mailboxes</h2>
+      <table><thead><tr><th>Email</th><th>Status</th><th></th></tr></thead><tbody id="mailbox-table"></tbody></table>
+      <label>Email</label><input id="mb-email" placeholder="you@yourdomain.com">
+      <label>Password</label><input id="mb-password" type="password">
+      <label>From name (shown to recipients)</label><input id="mb-from-name" placeholder="Your Name">
+      <button onclick="addMailbox()">Verify & Add Mailbox</button>
+      <div id="mb-msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Upload Leads</h2>
+      <p style="font-size:13px;color:var(--muted)">CSV columns: <code>business_name, contact_email</code>, optionally <code>first_touch_template</code> (name — omit to auto-rotate), plus any extra columns become <code>{{field}}</code> placeholders.</p>
+      <input type="file" id="csv-file" accept=".csv">
+      <button onclick="uploadCsv()">Upload CSV</button>
+      <div id="csv-msg"></div>
+    </div>
+
+  </div>
+
+  <div class="card">
+    <h2>Templates</h2>
+    <table><thead><tr><th>Name</th><th>Kind</th><th>Step</th><th>Gap (days)</th><th>Active</th></tr></thead><tbody id="template-table"></tbody></table>
+
+    <div class="row" style="margin-top:18px">
+      <div style="flex:1">
+        <label>Name</label><input id="t-name" placeholder="missed_lead">
+      </div>
+      <div style="flex:1">
+        <label>Kind</label>
+        <select id="t-kind" onchange="toggleTemplateFields()">
+          <option value="first_touch">first_touch</option>
+          <option value="followup">followup</option>
+        </select>
+      </div>
+    </div>
+    <div id="t-subject-wrap">
+      <label>Subject (first-touch only — follow-ups auto-thread as "Re: ...")</label>
+      <input id="t-subject" placeholder="Quick question about {{business_name}}">
+    </div>
+    <div class="row" id="t-followup-fields" style="display:none">
+      <div style="flex:1"><label>Step order</label><input id="t-step" type="number" placeholder="1"></div>
+      <div style="flex:1"><label>Gap days (after previous send)</label><input id="t-gap" type="number" placeholder="3"></div>
+    </div>
+    <label>Body</label>
+    <textarea id="t-body" placeholder="Hi {{first_name}}, ..."></textarea>
+    <button onclick="addTemplate()">Add Template</button>
+    <div id="t-msg"></div>
+  </div>
+
+</main>
+
+<script>
+const authHeader = () => 'Basic ' + btoa(prompt_creds());
+let cachedAuth = null;
+function prompt_creds() {
+  if (cachedAuth) return cachedAuth;
+  const u = localStorage.getItem('dash_user') || prompt('Dashboard username:');
+  const p = localStorage.getItem('dash_pass') || prompt('Dashboard password:');
+  localStorage.setItem('dash_user', u);
+  localStorage.setItem('dash_pass', p);
+  cachedAuth = u + ':' + p;
+  return cachedAuth;
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { ...(options.headers || {}), 'Authorization': authHeader() },
+  });
+  if (res.status === 401) {
+    localStorage.removeItem('dash_user'); localStorage.removeItem('dash_pass'); cachedAuth = null;
+    alert('Invalid credentials, please retry.');
+    throw new Error('unauthorized');
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || res.statusText);
+  }
+  return res.json();
+}
+
+async function loadStats() {
+  const s = await api('/api/stats');
+  const grid = document.getElementById('stats-grid');
+  grid.innerHTML = `
+    <div class="stat"><div class="num">${s.total_sent}</div><div class="label">Total sent</div></div>
+    <div class="stat"><div class="num">${s.reply_rate}%</div><div class="label">Reply rate</div></div>
+    <div class="stat"><div class="num">${s.interested}</div><div class="label">Interested</div></div>
+    <div class="stat"><div class="num">${s.trials_started}</div><div class="label">Trials started</div></div>
+  `;
+  const tbody = document.querySelector('#by-template-table tbody');
+  tbody.innerHTML = Object.entries(s.by_template).map(([name, v]) =>
+    `<tr><td>${name}</td><td>${v.sent}</td><td>${v.replied}</td><td>${v.reply_rate}%</td></tr>`
+  ).join('') || '<tr><td colspan="4" style="color:var(--muted)">No sends yet</td></tr>';
+}
+
+async function loadMailboxes() {
+  const boxes = await api('/api/mailboxes');
+  document.getElementById('mailbox-table').innerHTML = boxes.map(m => `
+    <tr>
+      <td>${m.email}</td>
+      <td><span class="badge ${m.verified ? 'good' : 'bad'}">${m.verified ? 'Verified' : 'Failed'}</span></td>
+      <td><button class="secondary" onclick="deleteMailbox(${m.id})">Remove</button></td>
+    </tr>`).join('') || '<tr><td colspan="3" style="color:var(--muted)">No mailboxes yet</td></tr>';
+}
+
+async function addMailbox() {
+  const email = document.getElementById('mb-email').value.trim();
+  const password = document.getElementById('mb-password').value;
+  const from_name = document.getElementById('mb-from-name').value.trim();
+  const msgEl = document.getElementById('mb-msg');
+  msgEl.innerHTML = '<div class="msg">Verifying via live IMAP login...</div>';
+  try {
+    await api('/api/mailboxes', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email, password, from_name}) });
+    msgEl.innerHTML = '<div class="msg ok">Mailbox verified and added.</div>';
+    document.getElementById('mb-email').value = '';
+    document.getElementById('mb-password').value = '';
+    loadMailboxes();
+  } catch (e) {
+    msgEl.innerHTML = `<div class="msg err">${e.message}</div>`;
+  }
+}
+
+async function deleteMailbox(id) {
+  if (!confirm('Remove this mailbox?')) return;
+  await api(`/api/mailboxes/${id}`, { method: 'DELETE' });
+  loadMailboxes();
+}
+
+async function loadTemplates() {
+  const templates = await api('/api/templates');
+  document.getElementById('template-table').innerHTML = templates.map(t => `
+    <tr>
+      <td>${t.name}</td><td>${t.kind}</td><td>${t.step_order ?? '–'}</td><td>${t.gap_days ?? '–'}</td>
+      <td><span class="badge ${t.active ? 'good' : 'bad'}">${t.active ? 'Active' : 'Inactive'}</span></td>
+    </tr>`).join('') || '<tr><td colspan="5" style="color:var(--muted)">No templates yet</td></tr>';
+}
+
+function toggleTemplateFields() {
+  const kind = document.getElementById('t-kind').value;
+  document.getElementById('t-subject-wrap').style.display = kind === 'first_touch' ? 'block' : 'none';
+  document.getElementById('t-followup-fields').style.display = kind === 'followup' ? 'flex' : 'none';
+}
+
+async function addTemplate() {
+  const payload = {
+    name: document.getElementById('t-name').value.trim(),
+    kind: document.getElementById('t-kind').value,
+    subject: document.getElementById('t-subject').value.trim(),
+    body: document.getElementById('t-body').value,
+    step_order: document.getElementById('t-step').value ? parseInt(document.getElementById('t-step').value) : null,
+    gap_days: document.getElementById('t-gap').value ? parseInt(document.getElementById('t-gap').value) : null,
+  };
+  const msgEl = document.getElementById('t-msg');
+  try {
+    await api('/api/templates', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    msgEl.innerHTML = '<div class="msg ok">Template added.</div>';
+    loadTemplates();
+  } catch (e) {
+    msgEl.innerHTML = `<div class="msg err">${e.message}</div>`;
+  }
+}
+
+async function uploadCsv() {
+  const fileInput = document.getElementById('csv-file');
+  const msgEl = document.getElementById('csv-msg');
+  if (!fileInput.files.length) { msgEl.innerHTML = '<div class="msg err">Choose a file first.</div>'; return; }
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  try {
+    const res = await fetch('/api/contacts/upload-csv', { method: 'POST', headers: {'Authorization': authHeader()}, body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Upload failed');
+    msgEl.innerHTML = `<div class="msg ok">Added ${data.added}, skipped ${data.skipped_duplicates} duplicates.${data.warnings.length ? ' ' + data.warnings.length + ' warning(s).' : ''}</div>`;
+  } catch (e) {
+    msgEl.innerHTML = `<div class="msg err">${e.message}</div>`;
+  }
+}
+
+// init
+toggleTemplateFields();
+loadStats();
+loadMailboxes();
+loadTemplates();
+</script>
+
+</body>
+</html>

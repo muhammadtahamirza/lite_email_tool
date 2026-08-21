@@ -1,0 +1,45 @@
+name: Outreach Engine
+
+on:
+  schedule:
+    # All times UTC. Adjust to your target market's local business hours.
+    # Example: target timezone UTC+5 -> 10:00 local = 05:00 UTC.
+    - cron: '0 5 * * *'    # main daily cycle: check -> followup -> send
+    - cron: '0 8 * * *'    # extra reply-check passes through the day
+    - cron: '0 11 * * *'
+    - cron: '0 14 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  daily-run:
+    if: github.event.schedule == '0 5 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Run daily cycle (check -> followup -> send)
+        working-directory: engine
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          DAILY_SEND_CAP: ${{ vars.DAILY_SEND_CAP }}
+        run: python run.py run-daily --limit "${DAILY_SEND_CAP:-80}"
+
+  extra-check:
+    if: github.event.schedule == '0 8 * * *' || github.event.schedule == '0 11 * * *' || github.event.schedule == '0 14 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Check inboxes for replies
+        working-directory: engine
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+        run: python run.py check --days 1

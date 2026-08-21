@@ -1,0 +1,116 @@
+import os
+import time
+import random
+import smtplib
+import imaplib
+import email as email_lib
+from email.mime.text import MIMEText
+from email.header import decode_header
+from email.utils import formatdate, make_msgid
+
+SMTP_HOST = os.getenv("SPACEMAIL_SMTP_HOST", "mail.privateemail.com")
+SMTP_PORT = int(os.getenv("SPACEMAIL_SMTP_PORT", "587"))
+IMAP_HOST = os.getenv("SPACEMAIL_IMAP_HOST", "mail.privateemail.com")
+IMAP_PORT = int(os.getenv("SPACEMAIL_IMAP_PORT", "993"))
+SENT_FOLDER = os.getenv("SENT_FOLDER", "Sent")
+
+MIN_DELAY_SECONDS = int(os.getenv("MIN_DELAY_SECONDS", "20"))
+MAX_DELAY_SECONDS = int(os.getenv("MAX_DELAY_SECONDS", "50"))
+
+
+def verify_mailbox(email_address: str, password: str) -> tuple[bool, str]:
+    """Attempts a real IMAP login. Returns (success, message).
+    This IS the confirmation step — there's no separate 'confirm' action
+    needed since a successful login proves the credentials work."""
+    try:
+        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        imap.login(email_address, password)
+        imap.logout()
+        return True, "Login successful"
+    except imaplib.IMAP4.error as e:
+        return False, f"IMAP login failed: {e}"
+    except Exception as e:
+        return False, f"Connection error: {e}"
+
+
+def send_email(email_address, password, from_name, to_email, subject, body,
+                in_reply_to=None, references=None):
+    """Sends via SMTP, threads if in_reply_to is given, files a Sent-folder
+    copy via IMAP APPEND (SMTP alone never records a copy anywhere).
+    Returns the Message-ID this email was sent with."""
+    domain = email_address.split("@")[-1]
+    msg_id = make_msgid(domain=domain)
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = f"{from_name} <{email_address}>" if from_name else email_address
+    msg["To"] = to_email
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = msg_id
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
+
+    raw_message = msg.as_bytes()
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(email_address, password)
+        server.sendmail(email_address, [to_email], raw_message)
+
+    _append_to_sent(email_address, password, raw_message)
+    return msg_id
+
+
+def _append_to_sent(email_address, password, raw_message):
+    try:
+        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        imap.login(email_address, password)
+        imap.append(SENT_FOLDER, "\\Seen", imaplib.Time2Internaldate(time.time()), raw_message)
+        imap.logout()
+    except Exception as e:
+        print(f"    (note: sent, but couldn't file a copy in '{SENT_FOLDER}' for {email_address}: {e})")
+
+
+def _decode_mime_words(s):
+    if not s:
+        return ""
+    parts = decode_header(s)
+    decoded = ""
+    for text, enc in parts:
+        if isinstance(text, bytes):
+            decoded += text.decode(enc or "utf-8", errors="ignore")
+        else:
+            decoded += text
+    return decoded
+
+
+def scan_inbox_for_replies(email_address, password, since_date_str):
+    found = set()
+    imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    imap.login(email_address, password)
+    imap.select("INBOX")
+
+    status, data = imap.search(None, f'(SINCE "{since_date_str}")')
+    if status != "OK":
+        imap.logout()
+        return found
+
+    for msg_id in data[0].split():
+        status, msg_data = imap.fetch(msg_id, "(RFC822)")
+        if status != "OK":
+            continue
+        raw = msg_data[0][1]
+        msg = email_lib.message_from_bytes(raw)
+        from_header = _decode_mime_words(msg.get("From", ""))
+        from_email = from_header.split("<")[-1].replace(">", "").strip().lower()
+        if from_email:
+            found.add(from_email)
+
+    imap.logout()
+    return found
+
+
+def random_delay():
+    time.sleep(random.randint(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS))
