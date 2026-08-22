@@ -8,9 +8,9 @@ from email.mime.text import MIMEText
 from email.header import decode_header
 from email.utils import formatdate, make_msgid
 
-SMTP_HOST = os.getenv("SPACEMAIL_SMTP_HOST", "mail.privateemail.com")
-SMTP_PORT = int(os.getenv("SPACEMAIL_SMTP_PORT", "587"))
-IMAP_HOST = os.getenv("SPACEMAIL_IMAP_HOST", "mail.privateemail.com")
+SMTP_HOST = os.getenv("SPACEMAIL_SMTP_HOST", "mail.spacemail.com")
+SMTP_PORT = int(os.getenv("SPACEMAIL_SMTP_PORT", "465"))
+IMAP_HOST = os.getenv("SPACEMAIL_IMAP_HOST", "mail.spacemail.com")
 IMAP_PORT = int(os.getenv("SPACEMAIL_IMAP_PORT", "993"))
 SENT_FOLDER = os.getenv("SENT_FOLDER", "Sent")
 
@@ -19,25 +19,32 @@ MAX_DELAY_SECONDS = int(os.getenv("MAX_DELAY_SECONDS", "50"))
 
 
 def verify_mailbox(email_address: str, password: str) -> tuple[bool, str]:
-    """Attempts a real IMAP login. Returns (success, message).
-    This IS the confirmation step — there's no separate 'confirm' action
-    needed since a successful login proves the credentials work."""
+    """Verifies via SMTP_SSL login — matches the exact connection method
+    already confirmed working. IMAP is checked too (needed for reply-scanning
+    and filing Sent-folder copies), but a mailbox is still usable for sending
+    even if IMAP has an issue, so IMAP failure is reported, not blocking."""
+    try:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            server.login(email_address, password)
+    except smtplib.SMTPAuthenticationError:
+        return False, "SMTP authentication failed — username or password incorrect"
+    except Exception as e:
+        return False, f"SMTP connection error: {e}"
+
     try:
         imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
         imap.login(email_address, password)
         imap.logout()
-        return True, "Login successful"
-    except imaplib.IMAP4.error as e:
-        return False, f"IMAP login failed: {e}"
     except Exception as e:
-        return False, f"Connection error: {e}"
+        return True, f"SMTP login OK, but IMAP check failed ({e}) — sending will work, but reply-checking and Sent-folder copies may not."
+
+    return True, "SMTP and IMAP login both successful"
 
 
 def send_email(email_address, password, from_name, to_email, subject, body,
                 in_reply_to=None, references=None):
-    """Sends via SMTP, threads if in_reply_to is given, files a Sent-folder
-    copy via IMAP APPEND (SMTP alone never records a copy anywhere).
-    Returns the Message-ID this email was sent with."""
+    """Sends via SMTP_SSL, threads if in_reply_to is given, files a
+    Sent-folder copy via IMAP APPEND. Returns the Message-ID."""
     domain = email_address.split("@")[-1]
     msg_id = make_msgid(domain=domain)
 
@@ -54,8 +61,7 @@ def send_email(email_address, password, from_name, to_email, subject, body,
 
     raw_message = msg.as_bytes()
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
         server.login(email_address, password)
         server.sendmail(email_address, [to_email], raw_message)
 

@@ -14,7 +14,7 @@ python run.py run-daily --limit 80  # check -> followup -> send, in that order
 import sys
 import os
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -54,7 +54,12 @@ def _mailbox_for_contact(mailboxes, contact_id):
 
 
 def _sent_today_count(session):
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Fixed deprecation warning here:
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # NOTE: If your SendLog.date_sent model column is timezone-naive, you might need to strip the timezone:
+    # today_start = today_start.replace(tzinfo=None)
+
     return len(session.exec(select(SendLog).where(SendLog.date_sent >= today_start)).all())
 
 
@@ -82,7 +87,8 @@ def cmd_check(days=1):
         print("No verified/active mailboxes configured.")
         return
 
-    since_date = (datetime.utcnow() - timedelta(days=days)).strftime("%d-%b-%Y")
+    # Fixed deprecation warning here:
+    since_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%d-%b-%Y")
     all_replied_from = set()
     for mb in mailboxes:
         print(f"Scanning {mb.email} since {since_date} ...")
@@ -101,7 +107,10 @@ def cmd_check(days=1):
         ).first()
         if latest and not latest.replied:
             latest.replied = True
-            latest.reply_date = datetime.utcnow()
+
+            # Fixed deprecation warning here:
+            latest.reply_date = datetime.now(timezone.utc)
+
             session.add(latest)
             matched += 1
             print(f"  -> Reply detected from {sender_email}")
@@ -153,8 +162,18 @@ def cmd_followup(limit=None, dry_run=False):
         if step_index >= len(followup_templates):
             continue  # sequence exhausted
 
-        gap_required = followup_templates[step_index].gap_days or 3
-        days_elapsed = (datetime.utcnow() - latest.date_sent).days
+        gap_required = followup_templates[step_index].gap_days
+
+        # Fixed deprecation warning here:
+        current_time = datetime.now(timezone.utc)
+
+        # NOTE: If `latest.date_sent` is returned from the database as a timezone-naive UTC timestamp,
+        # subtracting an aware timezone object will crash. If you get a 'TypeError: can't subtract offset-naive
+        # and offset-aware datetimes', append `.replace(tzinfo=None)` to current_time like so:
+        current_time = current_time.replace(tzinfo=None) if latest.date_sent.tzinfo is None else current_time
+
+        days_elapsed = (current_time - latest.date_sent).days
+
         if days_elapsed < gap_required:
             continue
 
