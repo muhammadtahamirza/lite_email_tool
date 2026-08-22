@@ -23,6 +23,7 @@ from app.auth import require_auth
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
 import mailer
+import sheets_sync
 
 app = FastAPI(title="Outreach Dashboard API")
 
@@ -224,6 +225,19 @@ def list_contacts(limit: int = 200):
     contacts = session.exec(select(Contact).order_by(Contact.created_at.desc()).limit(limit)).all()
     session.close()
     return contacts
+
+@app.post("/api/contacts/pull-from-sheet", dependencies=[Depends(require_auth)])
+def pull_from_sheet():
+    if not os.getenv("GOOGLE_SHEET_ID"):
+        raise HTTPException(status_code=400, detail="GOOGLE_SHEET_ID is not configured.")
+    try:
+        added = sheets_sync.pull_leads()
+        return {"added": added}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Sheet pull failed: {e}")
+
+
+
 
 
 # ---------- Stats ----------

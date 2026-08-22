@@ -77,6 +77,12 @@
       <input type="file" id="csv-file" accept=".csv">
       <button onclick="uploadCsv()">Upload CSV</button>
       <div id="csv-msg"></div>
+
+      <div style="margin-top:22px;padding-top:18px;border-top:1px solid var(--border)">
+        <p style="font-size:13px;color:var(--muted)">Or pull new leads directly from your connected Google Sheet (only new rows, matched by email — safe to click anytime).</p>
+        <button class="secondary" onclick="pullFromSheet()">Pull New Leads from Sheet</button>
+        <div id="sheet-msg"></div>
+      </div>
     </div>
 
   </div>
@@ -236,6 +242,17 @@ async function uploadCsv() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Upload failed');
     msgEl.innerHTML = `<div class="msg ok">Added ${data.added}, skipped ${data.skipped_duplicates} duplicates.${data.warnings.length ? ' ' + data.warnings.length + ' warning(s).' : ''}</div>`;
+  } catch (e) {
+    msgEl.innerHTML = `<div class="msg err">${e.message}</div>`;
+  }
+}
+
+async function pullFromSheet() {
+  const msgEl = document.getElementById('sheet-msg');
+  msgEl.innerHTML = '<div class="msg">Pulling from Google Sheet...</div>';
+  try {
+    const data = await api('/api/contacts/pull-from-sheet', { method: 'POST' });
+    msgEl.innerHTML = `<div class="msg ok">Added ${data.added} new lead(s) from the sheet.</div>`;
   } catch (e) {
     msgEl.innerHTML = `<div class="msg err">${e.message}</div>`;
   }

@@ -20,12 +20,14 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - name: Run daily cycle (check -> followup -> send)
+      - name: Run daily cycle (pull leads -> check -> followup -> send -> push status)
         working-directory: engine
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           DAILY_SEND_CAP: ${{ vars.DAILY_SEND_CAP }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
         run: python run.py run-daily --limit "${DAILY_SEND_CAP:-80}"
 
   extra-check:
