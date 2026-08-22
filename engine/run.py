@@ -26,6 +26,7 @@ from shared.db import init_db, get_session
 from shared.models import Mailbox, Contact, Template, SendLog
 from shared.crypto import decrypt_password
 import mailer
+import sheets_sync
 
 DAILY_SEND_CAP = int(os.getenv("DAILY_SEND_CAP", "80"))
 
@@ -305,16 +306,44 @@ def cmd_send(limit=None, dry_run=False):
     print(f"\nDone. {sent_count} email(s) {'previewed' if dry_run else 'sent and logged'}.")
 
 
+# NEW
+def cmd_pull_leads():
+    if not os.getenv("GOOGLE_SHEET_ID"):
+        print("GOOGLE_SHEET_ID not set — skipping Google Sheets pull (optional feature).")
+        return
+    try:
+        added = sheets_sync.pull_leads()
+        print(f"Pulled {added} new lead(s) from Google Sheet.")
+    except Exception as e:
+        print(f"Google Sheets pull failed (continuing anyway): {e}")
+
+
+def cmd_push_status():
+    if not os.getenv("GOOGLE_SHEET_ID"):
+        return
+    try:
+        updated = sheets_sync.push_status()
+        print(f"Updated status for {updated} row(s) in Google Sheet.")
+    except Exception as e:
+        print(f"Google Sheets status push failed (continuing anyway): {e}")
+
+
+
 def cmd_run_daily(limit=None, check_days=1, dry_run=False):
-    print("=== STEP 1/3: Checking for replies (before sending anything) ===")
+    print("=== STEP 0/4: Pulling new leads from Google Sheet (if configured) ===")
+    cmd_pull_leads()
+
+    print("\n=== STEP 1/4: Checking for replies (before sending anything) ===")
     cmd_check(days=check_days)
 
-    print("\n=== STEP 2/3: Sending due follow-ups ===")
+    print("\n=== STEP 2/4: Sending due follow-ups ===")
     cmd_followup(limit=limit, dry_run=dry_run)
 
-    print("\n=== STEP 3/3: Sending new first-touch batch ===")
+    print("\n=== STEP 3/4: Sending new first-touch batch ===")
     cmd_send(limit=limit, dry_run=dry_run)
 
+    print("\n=== STEP 4/4: Pushing status back to Google Sheet (if configured) ===")
+    cmd_push_status()
 
 def main():
     parser = argparse.ArgumentParser(description="Outreach sending engine")
@@ -335,7 +364,7 @@ def main():
     p_daily.add_argument("--limit", type=int, default=None)
     p_daily.add_argument("--check-days", type=int, default=1)
     p_daily.add_argument("--dry-run", action="store_true")
-
+    p_pull = sub.add_parser("pull-leads", help="Pull new leads from Google Sheet only")
     args = parser.parse_args()
 
     if args.command == "check":
@@ -346,6 +375,8 @@ def main():
         cmd_send(limit=args.limit, dry_run=args.dry_run)
     elif args.command == "run-daily":
         cmd_run_daily(limit=args.limit, check_days=args.check_days, dry_run=args.dry_run)
+    elif args.command == "pull-leads":
+        cmd_pull_leads()
 
 
 if __name__ == "__main__":
