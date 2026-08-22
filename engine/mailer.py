@@ -18,6 +18,16 @@ MIN_DELAY_SECONDS = int(os.getenv("MIN_DELAY_SECONDS", "20"))
 MAX_DELAY_SECONDS = int(os.getenv("MAX_DELAY_SECONDS", "50"))
 
 
+class PermanentBounce(Exception):
+    """The recipient address was definitively rejected (invalid mailbox,
+    domain doesn't exist, etc). Never retry — the address is bad."""
+
+
+class TransientSendError(Exception):
+    """A temporary failure (connection issue, timeout, brief server problem).
+    Safe to retry on the next run — not the recipient's fault."""
+
+
 def verify_mailbox(email_address: str, password: str) -> tuple[bool, str]:
     """Verifies via SMTP_SSL login — matches the exact connection method
     already confirmed working. IMAP is checked too (needed for reply-scanning
@@ -44,7 +54,11 @@ def verify_mailbox(email_address: str, password: str) -> tuple[bool, str]:
 def send_email(email_address, password, from_name, to_email, subject, body,
                 in_reply_to=None, references=None):
     """Sends via SMTP_SSL, threads if in_reply_to is given, files a
-    Sent-folder copy via IMAP APPEND. Returns the Message-ID."""
+    Sent-folder copy via IMAP APPEND. Returns the Message-ID.
+
+    Raises PermanentBounce if the recipient was definitively rejected
+    (invalid mailbox/domain — don't retry), or TransientSendError for
+    anything else (connection issues, timeouts — safe to retry later)."""
     domain = email_address.split("@")[-1]
     msg_id = make_msgid(domain=domain)
 
@@ -61,9 +75,24 @@ def send_email(email_address, password, from_name, to_email, subject, body,
 
     raw_message = msg.as_bytes()
 
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
-        server.login(email_address, password)
-        server.sendmail(email_address, [to_email], raw_message)
+    try:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            server.login(email_address, password)
+            server.sendmail(email_address, [to_email], raw_message)
+    except smtplib.SMTPRecipientsRefused as e:
+        # Server rejected the recipient address outright — this means the
+        # address is invalid/doesn't exist. Permanent, don't retry.
+        raise PermanentBounce(f"Recipient refused: {e}")
+    except smtplib.SMTPResponseException as e:
+        # Any other SMTP-level error with a status code. 5xx = permanent,
+        # 4xx = temporary (server busy, greylisting, etc).
+        if e.smtp_code >= 500:
+            raise PermanentBounce(f"SMTP {e.smtp_code}: {e.smtp_error}")
+        raise TransientSendError(f"SMTP {e.smtp_code}: {e.smtp_error}")
+    except Exception as e:
+        # Connection errors, timeouts, auth issues — none of these are the
+        # recipient's fault, so treat as retryable.
+        raise TransientSendError(str(e))
 
     _append_to_sent(email_address, password, raw_message)
     return msg_id

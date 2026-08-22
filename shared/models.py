@@ -6,6 +6,7 @@ engine reads.
 """
 
 from datetime import datetime
+from shared.utils import utcnow
 from typing import Optional, List
 from sqlmodel import SQLModel, Field, Column, JSON
 
@@ -19,7 +20,7 @@ class Mailbox(SQLModel, table=True):
     from_name: str = ""
     verified: bool = False
     active: bool = True  # can be toggled off without deleting (e.g. temporarily pause a mailbox)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Template(SQLModel, table=True):
@@ -38,7 +39,7 @@ class Template(SQLModel, table=True):
     step_order: Optional[int] = None
     gap_days: Optional[int] = None
     active: bool = True
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Contact(SQLModel, table=True):
@@ -49,7 +50,23 @@ class Contact(SQLModel, table=True):
     contact_email: str = Field(unique=True, index=True)
     first_touch_template_id: Optional[int] = Field(default=None, foreign_key="templates.id")
     extra_info: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SheetConfig(SQLModel, table=True):
+    __tablename__ = "sheet_configs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str  # your own label, e.g. "Med Spas - Karachi"
+    google_sheet_id: str
+    google_sheet_tab: str = "Sheet1"
+    # If a lead row in THIS sheet doesn't specify first_touch_template,
+    # fall back to this sheet's default (if set) before falling back to
+    # global auto-rotation across all active templates.
+    default_template_id: Optional[int] = Field(default=None, foreign_key="templates.id")
+    verified: bool = False
+    active: bool = True
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class SendLog(SQLModel, table=True):
@@ -64,7 +81,7 @@ class SendLog(SQLModel, table=True):
     mailbox_id: Optional[int] = Field(default=None, foreign_key="mailboxes.id")
     mailbox_email: str = ""
     follow_up_number: int = 1
-    date_sent: datetime = Field(default_factory=datetime.utcnow)
+    date_sent: datetime = Field(default_factory=utcnow)
     replied: bool = False
     reply_date: Optional[datetime] = None
     interested: Optional[bool] = None
@@ -76,3 +93,6 @@ class SendLog(SQLModel, table=True):
     message_id: str = ""
     in_reply_to: Optional[str] = None
     references: Optional[str] = None
+
+    # Delivery outcome
+    bounced: bool = False  # permanent failure (invalid address) — never retried

@@ -13,8 +13,9 @@ python run.py run-daily --limit 80  # check -> followup -> send, in that order
 
 import sys
 import os
+import re
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -25,16 +26,35 @@ from sqlmodel import select
 from shared.db import init_db, get_session
 from shared.models import Mailbox, Contact, Template, SendLog
 from shared.crypto import decrypt_password
+from shared.utils import utcnow
 import mailer
 import sheets_sync
 
 DAILY_SEND_CAP = int(os.getenv("DAILY_SEND_CAP", "80"))
 
 
+import re
+
 def _render(text, fields):
-    for key, val in fields.items():
-        text = text.replace("{{" + key + "}}", str(val) if val is not None else "")
-    return text
+    def match_handler(match):
+        tag_content = match.group(1)
+
+        if "|" in tag_content:
+            key, fallback = tag_content.split("|", 1)
+        else:
+            key, fallback = tag_content, ""
+
+        key = key.strip()
+        fallback = fallback.strip()
+
+        val = fields.get(key)
+
+        if val is not None and str(val).strip() != "":
+            return str(val).strip()
+
+        return fallback
+
+    return re.sub(r'\{\{(.*?)\}\}', match_handler, text)
 
 
 def _build_merge_fields(contact: Contact):
@@ -55,12 +75,7 @@ def _mailbox_for_contact(mailboxes, contact_id):
 
 
 def _sent_today_count(session):
-    # Fixed deprecation warning here:
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # NOTE: If your SendLog.date_sent model column is timezone-naive, you might need to strip the timezone:
-    # today_start = today_start.replace(tzinfo=None)
-
+    today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     return len(session.exec(select(SendLog).where(SendLog.date_sent >= today_start)).all())
 
 
@@ -88,8 +103,7 @@ def cmd_check(days=1):
         print("No verified/active mailboxes configured.")
         return
 
-    # Fixed deprecation warning here:
-    since_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%d-%b-%Y")
+    since_date = (utcnow() - timedelta(days=days)).strftime("%d-%b-%Y")
     all_replied_from = set()
     for mb in mailboxes:
         print(f"Scanning {mb.email} since {since_date} ...")
@@ -108,10 +122,7 @@ def cmd_check(days=1):
         ).first()
         if latest and not latest.replied:
             latest.replied = True
-
-            # Fixed deprecation warning here:
-            latest.reply_date = datetime.now(timezone.utc)
-
+            latest.reply_date = utcnow()
             session.add(latest)
             matched += 1
             print(f"  -> Reply detected from {sender_email}")
@@ -156,31 +167,25 @@ def cmd_followup(limit=None, dry_run=False):
             select(SendLog).where(SendLog.contact_id == contact.id)
             .order_by(SendLog.follow_up_number.desc())
         ).first()
-        if not latest or latest.replied:
-            continue  # never contacted yet, or already replied — skip
+        if not latest or latest.replied or latest.bounced:
+            continue  # never contacted yet, already replied, or a dead address — skip
 
         step_index = latest.follow_up_number - 1
         if step_index >= len(followup_templates):
             continue  # sequence exhausted
 
-        gap_required = followup_templates[step_index].gap_days
-
-        # Fixed deprecation warning here:
-        current_time = datetime.now(timezone.utc)
-
-        # NOTE: If `latest.date_sent` is returned from the database as a timezone-naive UTC timestamp,
-        # subtracting an aware timezone object will crash. If you get a 'TypeError: can't subtract offset-naive
-        # and offset-aware datetimes', append `.replace(tzinfo=None)` to current_time like so:
-        current_time = current_time.replace(tzinfo=None) if latest.date_sent.tzinfo is None else current_time
-
-        days_elapsed = (current_time - latest.date_sent).days
-
+        gap_required = followup_templates[step_index].gap_days or 3
+        days_elapsed = (utcnow() - latest.date_sent).days
         if days_elapsed < gap_required:
             continue
 
         template = followup_templates[step_index]
+        mailbox = _mailbox_for_contact(mailboxes, contact.id)
+
         fields = _build_merge_fields(contact)
         body = _render(template.body, fields)
+        first_name = mailbox.from_name
+        body = f"{body}\n\nBest,\n{first_name}"
 
         first_log = session.exec(
             select(SendLog).where(SendLog.contact_id == contact.id, SendLog.follow_up_number == 1)
@@ -189,8 +194,9 @@ def cmd_followup(limit=None, dry_run=False):
         subject = base_subject if base_subject.lower().startswith("re:") else f"Re: {base_subject}"
 
         new_references = (f"{latest.references} " if latest.references else "") + (latest.message_id or "")
-        mailbox = _mailbox_for_contact(mailboxes, contact.id)
         new_fup = latest.follow_up_number + 1
+
+
 
         if dry_run:
             print(f"  [DRY RUN] Would send '{template.name}' to {contact.business_name} "
@@ -203,8 +209,20 @@ def cmd_followup(limit=None, dry_run=False):
                     subject, body, in_reply_to=latest.message_id, references=new_references,
                 )
                 print(f"  Sent '{template.name}' to {contact.business_name} <{contact.contact_email}> (msg #{new_fup})")
-            except Exception as e:
-                print(f"  FAILED to send to {contact.contact_email}: {e}")
+            except mailer.PermanentBounce as e:
+                print(f"  BOUNCED (permanent — will never retry) {contact.contact_email}: {e}")
+                log = SendLog(
+                    contact_id=contact.id, contact_email=contact.contact_email,
+                    business_name=contact.business_name, template_id=template.id, template_name=template.name,
+                    mailbox_id=mailbox.id, mailbox_email=mailbox.email, follow_up_number=new_fup,
+                    subject=subject, bounced=True, notes=str(e)[:500],
+                )
+                session.add(log)
+                session.commit()
+                sent_count += 1
+                continue
+            except mailer.TransientSendError as e:
+                print(f"  FAILED (temporary — will retry next run) to send to {contact.contact_email}: {e}")
                 continue
 
             log = SendLog(
@@ -271,9 +289,15 @@ def cmd_send(limit=None, dry_run=False):
             continue
 
         fields = _build_merge_fields(contact)
+        mailbox = _mailbox_for_contact(mailboxes, contact.id)
+
         subject = _render(template.subject, fields)
         body = _render(template.body, fields)
-        mailbox = _mailbox_for_contact(mailboxes, contact.id)
+
+        # Extract the first name from the mailbox and append the signature
+        first_name = mailbox.from_name
+        body = f"{body}\n\nBest,\n{first_name}"
+
 
         if dry_run:
             print(f"  [DRY RUN] Would send '{template.name}' to {contact.business_name} "
@@ -285,9 +309,21 @@ def cmd_send(limit=None, dry_run=False):
                     mailbox.email, password, mailbox.from_name, contact.contact_email, subject, body,
                 )
                 print(f"  Sent '{template.name}' to {contact.business_name} <{contact.contact_email}> via {mailbox.email}")
-            except Exception as e:
-                print(f"  FAILED to send to {contact.contact_email}: {e}")
+            except mailer.PermanentBounce as e:
+                print(f"  BOUNCED (permanent — will never retry) {contact.contact_email}: {e}")
+                log = SendLog(
+                    contact_id=contact.id, contact_email=contact.contact_email,
+                    business_name=contact.business_name, template_id=template.id, template_name=template.name,
+                    mailbox_id=mailbox.id, mailbox_email=mailbox.email, follow_up_number=1,
+                    subject=subject, bounced=True, notes=str(e)[:500],
+                )
+                session.add(log)
+                session.commit()
+                sent_count += 1  # counts against budget — it did consume a send attempt
                 continue
+            except mailer.TransientSendError as e:
+                print(f"  FAILED (temporary — will retry next run) to send to {contact.contact_email}: {e}")
+                continue  # not logged — stays in the "pending" pool for next time
 
             log = SendLog(
                 contact_id=contact.id, contact_email=contact.contact_email,
@@ -306,7 +342,6 @@ def cmd_send(limit=None, dry_run=False):
     print(f"\nDone. {sent_count} email(s) {'previewed' if dry_run else 'sent and logged'}.")
 
 
-# NEW
 def cmd_pull_leads():
     if not os.getenv("GOOGLE_SHEET_ID"):
         print("GOOGLE_SHEET_ID not set — skipping Google Sheets pull (optional feature).")
@@ -328,8 +363,14 @@ def cmd_push_status():
         print(f"Google Sheets status push failed (continuing anyway): {e}")
 
 
-
 def cmd_run_daily(limit=None, check_days=1, dry_run=False):
+    """Runs the full daily cycle in the safe order:
+    0. Pull any new leads from the Google Sheet (if configured)
+    1. Check replies FIRST (so anyone who just replied is marked before we
+       decide who to email)
+    2. Send due follow-ups (warm contacts get priority for the daily budget)
+    3. Send new first-touch (fills whatever budget remains)
+    4. Push updated status back to the Sheet (if configured)"""
     print("=== STEP 0/4: Pulling new leads from Google Sheet (if configured) ===")
     cmd_pull_leads()
 
@@ -344,6 +385,7 @@ def cmd_run_daily(limit=None, check_days=1, dry_run=False):
 
     print("\n=== STEP 4/4: Pushing status back to Google Sheet (if configured) ===")
     cmd_push_status()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Outreach sending engine")
@@ -364,7 +406,9 @@ def main():
     p_daily.add_argument("--limit", type=int, default=None)
     p_daily.add_argument("--check-days", type=int, default=1)
     p_daily.add_argument("--dry-run", action="store_true")
+
     p_pull = sub.add_parser("pull-leads", help="Pull new leads from Google Sheet only")
+
     args = parser.parse_args()
 
     if args.command == "check":
