@@ -34,14 +34,18 @@ DAILY_SEND_CAP = int(os.getenv("DAILY_SEND_CAP", "80"))
 
 
 import re
+from shared.models import Campaign
 def cmd_push_status():
-	if not os.getenv("GOOGLE_SHEET_ID"):
-		return
-	try:
-		updated = sheets_sync.push_status()
-		print(f"Updated status for {updated} row(s) in Google Sheet.")
-	except Exception as e:
-		print(f"Google Sheets status push failed (continuing anyway): {e}")
+	init_db()
+	session = get_session()
+	campaigns = session.exec(select(Campaign).where(Campaign.active == True)).all()
+	session.close()
+	for c in campaigns:
+		try:
+			updated = sheets_sync.push_status(c)
+			print(f"Updated status for {updated} row(s) in Google Sheet for campaign '{c.name}'.")
+		except Exception as e:
+			print(f"Google Sheets status push failed for campaign '{c.name}' (continuing anyway): {e}")
 
 
 def _render(text, fields):
@@ -76,11 +80,14 @@ def _active_mailboxes(session):
 	return session.exec(select(Mailbox).where(Mailbox.active == True, Mailbox.verified == True)).all()
 
 
-def _mailbox_for_contact(mailboxes, contact_id):
+def _mailbox_for_contact(mailboxes, contact):
 	"""Deterministic per-contact assignment — same contact always gets the
 	same mailbox for their whole thread, so a follow-up never appears to
 	come from a different sender mid-conversation."""
-	return mailboxes[contact_id % len(mailboxes)]
+	valid = [m for m in mailboxes if m.campaign_id == contact.campaign_id]
+	if not valid:
+		valid = mailboxes
+	return valid[contact.id % len(valid)]
 
 
 def _sent_today_count(session):
@@ -118,7 +125,7 @@ def cmd_check(days=1):
 		print(f"Scanning {mb.email} since {since_date} ...")
 		try:
 			password = decrypt_password(mb.encrypted_password)
-			found = mailer.scan_inbox_for_replies(mb.email, password, since_date)
+			found = mailer.scan_inbox_for_replies(mb.email, password, since_date, mb.provider)
 			all_replied_from |= found
 		except Exception as e:
 			print(f"  Could not scan {mb.email}: {e}")
@@ -191,7 +198,7 @@ def cmd_followup(limit=None, dry_run=False):
 			continue
 
 		template = followup_templates[step_index]
-		mailbox = _mailbox_for_contact(mailboxes, contact.id)
+		mailbox = _mailbox_for_contact(mailboxes, contact)
 
 		fields = _build_merge_fields(contact)
 		body = _render(template.body, fields)
@@ -217,7 +224,7 @@ def cmd_followup(limit=None, dry_run=False):
 				password = decrypt_password(mailbox.encrypted_password)
 				msg_id = mailer.send_email(
 					mailbox.email, password, mailbox.from_name, contact.contact_email,
-					subject, body, in_reply_to=latest.message_id, references=new_references,
+					subject, body, in_reply_to=latest.message_id, references=new_references, provider=mailbox.provider
 				)
 				print(f"  Sent '{template.name}' to {contact.business_name} <{contact.contact_email}> (msg #{new_fup})")
 			except mailer.PermanentBounce as e:
@@ -300,7 +307,7 @@ def cmd_send(limit=None, dry_run=False):
 			continue
 
 		fields = _build_merge_fields(contact)
-		mailbox = _mailbox_for_contact(mailboxes, contact.id)
+		mailbox = _mailbox_for_contact(mailboxes, contact)
 
 		subject = _render(template.subject, fields)
 		body = _render(template.body, fields)
@@ -317,7 +324,7 @@ def cmd_send(limit=None, dry_run=False):
 			try:
 				password = decrypt_password(mailbox.encrypted_password)
 				msg_id = mailer.send_email(
-					mailbox.email, password, mailbox.from_name, contact.contact_email, subject, body,
+					mailbox.email, password, mailbox.from_name, contact.contact_email, subject, body, provider=mailbox.provider
 				)
 				print(f"  Sent '{template.name}' to {contact.business_name} <{contact.contact_email}> via {mailbox.email}")
 			except mailer.PermanentBounce as e:
@@ -354,14 +361,16 @@ def cmd_send(limit=None, dry_run=False):
 
 
 def cmd_pull_leads():
-	if not os.getenv("GOOGLE_SHEET_ID"):
-		print("GOOGLE_SHEET_ID not set — skipping Google Sheets pull (optional feature).")
-		return
-	try:
-		added = sheets_sync.pull_leads()
-		print(f"Pulled {added} new lead(s) from Google Sheet.")
-	except Exception as e:
-		print(f"Google Sheets pull failed (continuing anyway): {e}")
+	init_db()
+	session = get_session()
+	campaigns = session.exec(select(Campaign).where(Campaign.active == True)).all()
+	session.close()
+	for c in campaigns:
+		try:
+			added = sheets_sync.pull_leads(c)
+			print(f"Pulled {added} new lead(s) from Google Sheet for campaign '{c.name}'.")
+		except Exception as e:
+			print(f"Google Sheets pull failed for campaign '{c.name}' (continuing anyway): {e}")
 
 
 

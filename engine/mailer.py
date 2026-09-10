@@ -8,11 +8,23 @@ from email.mime.text import MIMEText
 from email.header import decode_header
 from email.utils import formatdate, make_msgid
 
-SMTP_HOST = os.getenv("SPACEMAIL_SMTP_HOST", "mail.spacemail.com")
-SMTP_PORT = int(os.getenv("SPACEMAIL_SMTP_PORT", "465"))
-IMAP_HOST = os.getenv("SPACEMAIL_IMAP_HOST", "mail.spacemail.com")
-IMAP_PORT = int(os.getenv("SPACEMAIL_IMAP_PORT", "993"))
-SENT_FOLDER = os.getenv("SENT_FOLDER", "Sent")
+def get_provider_settings(provider: str):
+    if provider == "gmail":
+        return {
+            "SMTP_HOST": "smtp.gmail.com",
+            "SMTP_PORT": 465,
+            "IMAP_HOST": "imap.gmail.com",
+            "IMAP_PORT": 993,
+            "SENT_FOLDER": '"[Gmail]/Sent Mail"'
+        }
+    else:
+        return {
+            "SMTP_HOST": os.getenv("SPACEMAIL_SMTP_HOST", "mail.spacemail.com"),
+            "SMTP_PORT": int(os.getenv("SPACEMAIL_SMTP_PORT", "465")),
+            "IMAP_HOST": os.getenv("SPACEMAIL_IMAP_HOST", "mail.spacemail.com"),
+            "IMAP_PORT": int(os.getenv("SPACEMAIL_IMAP_PORT", "993")),
+            "SENT_FOLDER": os.getenv("SENT_FOLDER", "Sent")
+        }
 
 MIN_DELAY_SECONDS = int(os.getenv("MIN_DELAY_SECONDS", "20"))
 MAX_DELAY_SECONDS = int(os.getenv("MAX_DELAY_SECONDS", "50"))
@@ -28,13 +40,14 @@ class TransientSendError(Exception):
     Safe to retry on the next run — not the recipient's fault."""
 
 
-def verify_mailbox(email_address: str, password: str) -> tuple[bool, str]:
+def verify_mailbox(email_address: str, password: str, provider: str = "spacemail") -> tuple[bool, str]:
     """Verifies via SMTP_SSL login — matches the exact connection method
     already confirmed working. IMAP is checked too (needed for reply-scanning
     and filing Sent-folder copies), but a mailbox is still usable for sending
     even if IMAP has an issue, so IMAP failure is reported, not blocking."""
+    settings = get_provider_settings(provider)
     try:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+        with smtplib.SMTP_SSL(settings["SMTP_HOST"], settings["SMTP_PORT"], timeout=15) as server:
             server.login(email_address, password)
     except smtplib.SMTPAuthenticationError:
         return False, "SMTP authentication failed — username or password incorrect"
@@ -42,7 +55,7 @@ def verify_mailbox(email_address: str, password: str) -> tuple[bool, str]:
         return False, f"SMTP connection error: {e}"
 
     try:
-        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        imap = imaplib.IMAP4_SSL(settings["IMAP_HOST"], settings["IMAP_PORT"])
         imap.login(email_address, password)
         imap.logout()
     except Exception as e:
@@ -52,13 +65,14 @@ def verify_mailbox(email_address: str, password: str) -> tuple[bool, str]:
 
 
 def send_email(email_address, password, from_name, to_email, subject, body,
-                in_reply_to=None, references=None):
+                in_reply_to=None, references=None, provider="spacemail"):
     """Sends via SMTP_SSL, threads if in_reply_to is given, files a
     Sent-folder copy via IMAP APPEND. Returns the Message-ID.
 
     Raises PermanentBounce if the recipient was definitively rejected
     (invalid mailbox/domain — don't retry), or TransientSendError for
     anything else (connection issues, timeouts — safe to retry later)."""
+    settings = get_provider_settings(provider)
     domain = email_address.split("@")[-1]
     msg_id = make_msgid(domain=domain)
 
@@ -76,7 +90,7 @@ def send_email(email_address, password, from_name, to_email, subject, body,
     raw_message = msg.as_bytes()
 
     try:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+        with smtplib.SMTP_SSL(settings["SMTP_HOST"], settings["SMTP_PORT"], timeout=15) as server:
             server.login(email_address, password)
             server.sendmail(email_address, [to_email], raw_message)
     except smtplib.SMTPRecipientsRefused as e:
@@ -94,18 +108,19 @@ def send_email(email_address, password, from_name, to_email, subject, body,
         # recipient's fault, so treat as retryable.
         raise TransientSendError(str(e))
 
-    _append_to_sent(email_address, password, raw_message)
+    _append_to_sent(email_address, password, raw_message, provider)
     return msg_id
 
 
-def _append_to_sent(email_address, password, raw_message):
+def _append_to_sent(email_address, password, raw_message, provider="spacemail"):
+    settings = get_provider_settings(provider)
     try:
-        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        imap = imaplib.IMAP4_SSL(settings["IMAP_HOST"], settings["IMAP_PORT"])
         imap.login(email_address, password)
-        imap.append(SENT_FOLDER, "\\Seen", imaplib.Time2Internaldate(time.time()), raw_message)
+        imap.append(settings["SENT_FOLDER"], "\\Seen", imaplib.Time2Internaldate(time.time()), raw_message)
         imap.logout()
     except Exception as e:
-        print(f"    (note: sent, but couldn't file a copy in '{SENT_FOLDER}' for {email_address}: {e})")
+        print(f"    (note: sent, but couldn't file a copy in '{settings['SENT_FOLDER']}' for {email_address}: {e})")
 
 
 def _decode_mime_words(s):
@@ -121,9 +136,10 @@ def _decode_mime_words(s):
     return decoded
 
 
-def scan_inbox_for_replies(email_address, password, since_date_str):
+def scan_inbox_for_replies(email_address, password, since_date_str, provider="spacemail"):
+    settings = get_provider_settings(provider)
     found = set()
-    imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    imap = imaplib.IMAP4_SSL(settings["IMAP_HOST"], settings["IMAP_PORT"])
     imap.login(email_address, password)
     imap.select("INBOX")
 

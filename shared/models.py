@@ -11,6 +11,17 @@ from typing import Optional, List
 from sqlmodel import SQLModel, Field, Column, JSON
 
 
+class Campaign(SQLModel, table=True):
+    __tablename__ = "campaigns"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(unique=True, index=True)
+    google_sheet_id: str = ""
+    google_sheet_tab: str = "Sheet1"
+    active: bool = True
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class Mailbox(SQLModel, table=True):
     __tablename__ = "mailboxes"
 
@@ -18,6 +29,8 @@ class Mailbox(SQLModel, table=True):
     email: str = Field(unique=True, index=True)
     encrypted_password: str
     from_name: str = ""
+    provider: str = "spacemail"  # "spacemail" or "gmail"
+    campaign_id: Optional[int] = Field(default=None, foreign_key="campaigns.id")
     verified: bool = False
     active: bool = True  # can be toggled off without deleting (e.g. temporarily pause a mailbox)
     created_at: datetime = Field(default_factory=utcnow)
@@ -29,6 +42,7 @@ class Template(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     kind: str  # "first_touch" or "followup"
+    campaign_id: Optional[int] = Field(default=None, foreign_key="campaigns.id")
     # For "first_touch" templates: subject is used directly.
     # For "followup" templates: subject is ignored — follow-ups always thread
     # as "Re: <original first-touch subject>" automatically.
@@ -48,24 +62,9 @@ class Contact(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     business_name: str
     contact_email: str = Field(unique=True, index=True)
+    campaign_id: Optional[int] = Field(default=None, foreign_key="campaigns.id")
     first_touch_template_id: Optional[int] = Field(default=None, foreign_key="templates.id")
     extra_info: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    created_at: datetime = Field(default_factory=utcnow)
-
-
-class SheetConfig(SQLModel, table=True):
-    __tablename__ = "sheet_configs"
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str  # your own label, e.g. "Med Spas - Karachi"
-    google_sheet_id: str
-    google_sheet_tab: str = "Sheet1"
-    # If a lead row in THIS sheet doesn't specify first_touch_template,
-    # fall back to this sheet's default (if set) before falling back to
-    # global auto-rotation across all active templates.
-    default_template_id: Optional[int] = Field(default=None, foreign_key="templates.id")
-    verified: bool = False
-    active: bool = True
     created_at: datetime = Field(default_factory=utcnow)
 
 

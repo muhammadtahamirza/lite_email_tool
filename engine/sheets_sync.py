@@ -41,15 +41,13 @@ GREEN = {"red": 0.72, "green": 0.88, "blue": 0.80}   # replied
 YELLOW = {"red": 1.0, "green": 0.95, "blue": 0.60}   # sent, not replied yet
 
 
-def _get_worksheet():
+def _get_worksheet(sheet_id: str, tab_name: str):
     creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    tab_name = os.getenv("GOOGLE_SHEET_TAB", "Sheet1")
 
     if not creds_json:
         raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not set.")
     if not sheet_id:
-        raise RuntimeError("GOOGLE_SHEET_ID is not set.")
+        raise RuntimeError("No Google Sheet ID provided.")
 
     info = json.loads(creds_json)
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
@@ -58,16 +56,27 @@ def _get_worksheet():
     return sh.worksheet(tab_name)
 
 
-def pull_leads() -> int:
+def pull_leads(campaign) -> int:
     """Reads every row from the sheet; any contact_email not already in the
     DB becomes a new Contact. Safe to run repeatedly — existing contacts
     (matched by email) are always skipped, never duplicated or overwritten."""
-    ws = _get_worksheet()
+
+    sheet_id = campaign.google_sheet_id or os.getenv("GOOGLE_SHEET_ID")
+    tab_name = campaign.google_sheet_tab or "Sheet1"
+
+    ws = _get_worksheet(sheet_id, tab_name)
     records = ws.get_all_records()  # list of dicts, keyed by header row
 
     session = get_session()
+    # Filter existing emails only for this campaign? Or globally?
+    # Usually globally is fine to prevent spamming same lead from multiple campaigns,
+    # or by campaign if you want to allow it. Let's do by campaign to be safer or global.
+    # The current code does it globally. Let's keep it global.
     existing_emails = {c.contact_email for c in session.exec(select(Contact)).all()}
-    templates_by_name = {t.name: t for t in session.exec(select(Template)).all()}
+
+    # We should only use templates for THIS campaign, but old code used all templates.
+    # Let's get templates for this campaign.
+    templates_by_name = {t.name: t for t in session.exec(select(Template).where(Template.campaign_id == campaign.id)).all()}
 
     added = 0
     for row in records:
@@ -88,6 +97,7 @@ def pull_leads() -> int:
 
         contact = Contact(
             business_name=business_name, contact_email=email,
+            campaign_id=campaign.id,
             first_touch_template_id=template_id, extra_info=extra_info,
         )
         session.add(contact)
@@ -99,10 +109,13 @@ def pull_leads() -> int:
     return added
 
 
-def push_status() -> int:
+def push_status(campaign) -> int:
     """Writes message_no_sent + replied back to matching rows (by email),
     and colors the replied cell green (replied) or yellow (sent, waiting)."""
-    ws = _get_worksheet()
+    sheet_id = campaign.google_sheet_id or os.getenv("GOOGLE_SHEET_ID")
+    tab_name = campaign.google_sheet_tab or "Sheet1"
+
+    ws = _get_worksheet(sheet_id, tab_name)
     all_values = ws.get_all_values()
     if not all_values:
         return 0

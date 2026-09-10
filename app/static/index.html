@@ -32,18 +32,24 @@
   .msg { font-size:13px; margin-top:10px; padding:8px 12px; border-radius:8px; }
   .msg.ok { background:rgba(62,207,142,0.12); color:var(--good); }
   .msg.err { background:rgba(255,107,107,0.12); color:var(--bad); }
-  .file-drop { border:1px dashed var(--border); border-radius:10px; padding:24px; text-align:center; color:var(--muted); cursor:pointer; }
   .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  .campaign-bar { display: flex; gap: 15px; align-items: center; }
+  .campaign-bar select { width: auto; min-width: 200px; }
 </style>
 </head>
 <body>
 
 <header>
   <h1>Outreach Dashboard</h1>
+  <div class="campaign-bar">
+    <label style="margin:0">Campaign:</label>
+    <select id="campaign-select" onchange="switchCampaign()"></select>
+    <button class="secondary" style="margin:0; padding:6px 12px; font-size:12px" onclick="showCampaignModal()">+ New</button>
+  </div>
   <span id="auth-status" style="font-size:12px;color:var(--muted)"></span>
 </header>
 
-<main>
+<main id="main-content" style="display:none;">
 
   <div class="card">
     <h2>Stats</h2>
@@ -63,9 +69,19 @@
 
     <div class="card">
       <h2>Mailboxes</h2>
-      <table><thead><tr><th>Email</th><th>Status</th><th></th></tr></thead><tbody id="mailbox-table"></tbody></table>
+      <table><thead><tr><th>Provider</th><th>Email</th><th>Status</th><th></th></tr></thead><tbody id="mailbox-table"></tbody></table>
+      
+      <div class="row">
+        <div style="flex:1">
+          <label>Provider</label>
+          <select id="mb-provider">
+            <option value="spacemail">Spacemail</option>
+            <option value="gmail">Gmail</option>
+          </select>
+        </div>
+      </div>
       <label>Email</label><input id="mb-email" placeholder="you@yourdomain.com">
-      <label>Password</label><input id="mb-password" type="password">
+      <label>Password / App Password</label><input id="mb-password" type="password">
       <label>From name (shown to recipients)</label><input id="mb-from-name" placeholder="Your Name">
       <button onclick="addMailbox()">Verify & Add Mailbox</button>
       <div id="mb-msg"></div>
@@ -119,6 +135,23 @@
 
 </main>
 
+<div id="campaign-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); align-items:center; justify-content:center;">
+  <div class="card" style="width:400px;">
+    <h2 style="margin-top:0">New Campaign</h2>
+    <label>Campaign Name</label>
+    <input id="c-name" placeholder="e.g. Med Spas 2026">
+    <label>Google Sheet ID (optional, overrides global env var)</label>
+    <input id="c-sheet-id" placeholder="1BxiMVs0X_x...">
+    <label>Google Sheet Tab</label>
+    <input id="c-sheet-tab" value="Sheet1">
+    <div class="row" style="margin-top:16px;">
+      <button onclick="addCampaign()">Create Campaign</button>
+      <button class="secondary" onclick="document.getElementById('campaign-modal').style.display='none'">Cancel</button>
+    </div>
+    <div id="c-msg"></div>
+  </div>
+</div>
+
 <script>
 const authHeader = () => 'Basic ' + btoa(prompt_creds());
 let cachedAuth = null;
@@ -149,8 +182,64 @@ async function api(path, options = {}) {
   return res.json();
 }
 
+let currentCampaignId = null;
+
+async function loadCampaigns() {
+  const campaigns = await api('/api/campaigns');
+  const select = document.getElementById('campaign-select');
+  select.innerHTML = campaigns.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+  
+  if (campaigns.length > 0) {
+    if (!currentCampaignId || !campaigns.find(c => c.id == currentCampaignId)) {
+      currentCampaignId = campaigns[0].id;
+    }
+    select.value = currentCampaignId;
+    document.getElementById('main-content').style.display = 'grid';
+    refreshAll();
+  } else {
+    document.getElementById('main-content').style.display = 'none';
+    currentCampaignId = null;
+    showCampaignModal();
+  }
+}
+
+function switchCampaign() {
+  currentCampaignId = document.getElementById('campaign-select').value;
+  refreshAll();
+}
+
+function refreshAll() {
+  if(!currentCampaignId) return;
+  loadStats();
+  loadMailboxes();
+  loadTemplates();
+}
+
+function showCampaignModal() {
+  document.getElementById('campaign-modal').style.display = 'flex';
+}
+
+async function addCampaign() {
+  const payload = {
+    name: document.getElementById('c-name').value.trim(),
+    google_sheet_id: document.getElementById('c-sheet-id').value.trim(),
+    google_sheet_tab: document.getElementById('c-sheet-tab').value.trim() || 'Sheet1'
+  };
+  const msgEl = document.getElementById('c-msg');
+  try {
+    await api('/api/campaigns', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    document.getElementById('campaign-modal').style.display = 'none';
+    document.getElementById('c-name').value = '';
+    document.getElementById('c-sheet-id').value = '';
+    document.getElementById('c-sheet-tab').value = 'Sheet1';
+    loadCampaigns();
+  } catch (e) {
+    msgEl.innerHTML = `<div class="msg err">${e.message}</div>`;
+  }
+}
+
 async function loadStats() {
-  const s = await api('/api/stats');
+  const s = await api('/api/stats?campaign_id=' + currentCampaignId);
   const grid = document.getElementById('stats-grid');
   grid.innerHTML = `
     <div class="stat"><div class="num">${s.total_sent}</div><div class="label">Total sent</div></div>
@@ -165,23 +254,26 @@ async function loadStats() {
 }
 
 async function loadMailboxes() {
-  const boxes = await api('/api/mailboxes');
+  const allBoxes = await api('/api/mailboxes');
+  const boxes = allBoxes.filter(m => m.campaign_id == currentCampaignId);
   document.getElementById('mailbox-table').innerHTML = boxes.map(m => `
     <tr>
+      <td style="text-transform:capitalize">${m.provider}</td>
       <td>${m.email}</td>
       <td><span class="badge ${m.verified ? 'good' : 'bad'}">${m.verified ? 'Verified' : 'Failed'}</span></td>
       <td><button class="secondary" onclick="deleteMailbox(${m.id})">Remove</button></td>
-    </tr>`).join('') || '<tr><td colspan="3" style="color:var(--muted)">No mailboxes yet</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="4" style="color:var(--muted)">No mailboxes in this campaign yet</td></tr>';
 }
 
 async function addMailbox() {
+  const provider = document.getElementById('mb-provider').value;
   const email = document.getElementById('mb-email').value.trim();
   const password = document.getElementById('mb-password').value;
   const from_name = document.getElementById('mb-from-name').value.trim();
   const msgEl = document.getElementById('mb-msg');
   msgEl.innerHTML = '<div class="msg">Verifying via live IMAP login...</div>';
   try {
-    await api('/api/mailboxes', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email, password, from_name}) });
+    await api('/api/mailboxes', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email, password, from_name, provider, campaign_id: parseInt(currentCampaignId)}) });
     msgEl.innerHTML = '<div class="msg ok">Mailbox verified and added.</div>';
     document.getElementById('mb-email').value = '';
     document.getElementById('mb-password').value = '';
@@ -198,12 +290,13 @@ async function deleteMailbox(id) {
 }
 
 async function loadTemplates() {
-  const templates = await api('/api/templates');
+  const allTemplates = await api('/api/templates');
+  const templates = allTemplates.filter(t => t.campaign_id == currentCampaignId);
   document.getElementById('template-table').innerHTML = templates.map(t => `
     <tr>
       <td>${t.name}</td><td>${t.kind}</td><td>${t.step_order ?? '–'}</td><td>${t.gap_days ?? '–'}</td>
       <td><span class="badge ${t.active ? 'good' : 'bad'}">${t.active ? 'Active' : 'Inactive'}</span></td>
-    </tr>`).join('') || '<tr><td colspan="5" style="color:var(--muted)">No templates yet</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="5" style="color:var(--muted)">No templates in this campaign yet</td></tr>';
 }
 
 function toggleTemplateFields() {
@@ -220,6 +313,7 @@ async function addTemplate() {
     body: document.getElementById('t-body').value,
     step_order: document.getElementById('t-step').value ? parseInt(document.getElementById('t-step').value) : null,
     gap_days: document.getElementById('t-gap').value ? parseInt(document.getElementById('t-gap').value) : null,
+    campaign_id: parseInt(currentCampaignId)
   };
   const msgEl = document.getElementById('t-msg');
   try {
@@ -238,7 +332,7 @@ async function uploadCsv() {
   const formData = new FormData();
   formData.append('file', fileInput.files[0]);
   try {
-    const res = await fetch('/api/contacts/upload-csv', { method: 'POST', headers: {'Authorization': authHeader()}, body: formData });
+    const res = await fetch(`/api/contacts/upload-csv?campaign_id=${currentCampaignId}`, { method: 'POST', headers: {'Authorization': authHeader()}, body: formData });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Upload failed');
     msgEl.innerHTML = `<div class="msg ok">Added ${data.added}, skipped ${data.skipped_duplicates} duplicates.${data.warnings.length ? ' ' + data.warnings.length + ' warning(s).' : ''}</div>`;
@@ -251,7 +345,7 @@ async function pullFromSheet() {
   const msgEl = document.getElementById('sheet-msg');
   msgEl.innerHTML = '<div class="msg">Pulling from Google Sheet...</div>';
   try {
-    const data = await api('/api/contacts/pull-from-sheet', { method: 'POST' });
+    const data = await api(`/api/contacts/pull-from-sheet?campaign_id=${currentCampaignId}`, { method: 'POST' });
     msgEl.innerHTML = `<div class="msg ok">Added ${data.added} new lead(s) from the sheet.</div>`;
   } catch (e) {
     msgEl.innerHTML = `<div class="msg err">${e.message}</div>`;
@@ -260,9 +354,7 @@ async function pullFromSheet() {
 
 // init
 toggleTemplateFields();
-loadStats();
-loadMailboxes();
-loadTemplates();
+loadCampaigns();
 </script>
 
 </body>

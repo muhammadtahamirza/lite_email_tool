@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from shared.db import init_db, get_session
-from shared.models import Mailbox, Contact, Template, SendLog
+from shared.models import Mailbox, Contact, Template, SendLog, Campaign
 from shared.crypto import encrypt_password
 from app.auth import require_auth
 
@@ -35,10 +35,23 @@ def on_startup():
 
 # ---------- Schemas ----------
 
+class CampaignIn(BaseModel):
+    name: str
+    google_sheet_id: Optional[str] = ""
+    google_sheet_tab: Optional[str] = "Sheet1"
+
+class CampaignUpdate(BaseModel):
+    name: Optional[str] = None
+    google_sheet_id: Optional[str] = None
+    google_sheet_tab: Optional[str] = None
+    active: Optional[bool] = None
+
 class MailboxIn(BaseModel):
     email: str
     password: str
     from_name: str = ""
+    provider: str = "spacemail"
+    campaign_id: Optional[int] = None
 
 
 class TemplateIn(BaseModel):
@@ -48,6 +61,7 @@ class TemplateIn(BaseModel):
     body: str
     step_order: Optional[int] = None
     gap_days: Optional[int] = None
+    campaign_id: Optional[int] = None
 
 
 class TemplateUpdate(BaseModel):
@@ -57,6 +71,54 @@ class TemplateUpdate(BaseModel):
     step_order: Optional[int] = None
     gap_days: Optional[int] = None
     active: Optional[bool] = None
+    campaign_id: Optional[int] = None
+
+
+# ---------- Campaigns ----------
+
+@app.post("/api/campaigns", dependencies=[Depends(require_auth)])
+def create_campaign(payload: CampaignIn):
+    session = get_session()
+    campaign = Campaign(**payload.dict())
+    session.add(campaign)
+    session.commit()
+    session.refresh(campaign)
+    session.close()
+    return campaign
+
+@app.get("/api/campaigns", dependencies=[Depends(require_auth)])
+def list_campaigns():
+    session = get_session()
+    campaigns = session.exec(select(Campaign)).all()
+    session.close()
+    return campaigns
+
+@app.put("/api/campaigns/{campaign_id}", dependencies=[Depends(require_auth)])
+def update_campaign(campaign_id: int, payload: CampaignUpdate):
+    session = get_session()
+    campaign = session.get(Campaign, campaign_id)
+    if not campaign:
+        session.close()
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    for key, value in payload.dict(exclude_unset=True).items():
+        setattr(campaign, key, value)
+    session.add(campaign)
+    session.commit()
+    session.refresh(campaign)
+    session.close()
+    return campaign
+
+@app.delete("/api/campaigns/{campaign_id}", dependencies=[Depends(require_auth)])
+def delete_campaign(campaign_id: int):
+    session = get_session()
+    campaign = session.get(Campaign, campaign_id)
+    if not campaign:
+        session.close()
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    session.delete(campaign)
+    session.commit()
+    session.close()
+    return {"deleted": True}
 
 
 # ---------- Mailboxes ----------
@@ -66,7 +128,7 @@ def add_mailbox(payload: MailboxIn):
     """Verifies via a real IMAP login BEFORE saving anything. This live
     login attempt is the confirmation step — no separate 'confirm' action
     is needed since a successful login already proves the credentials work."""
-    success, message = mailer.verify_mailbox(payload.email, payload.password)
+    success, message = mailer.verify_mailbox(payload.email, payload.password, payload.provider)
     if not success:
         raise HTTPException(status_code=400, detail=f"Mailbox verification failed: {message}")
 
@@ -80,6 +142,8 @@ def add_mailbox(payload: MailboxIn):
         email=payload.email,
         encrypted_password=encrypt_password(payload.password),
         from_name=payload.from_name,
+        provider=payload.provider,
+        campaign_id=payload.campaign_id,
         verified=True,
     )
     session.add(mailbox)
@@ -95,7 +159,8 @@ def list_mailboxes():
     mailboxes = session.exec(select(Mailbox)).all()
     session.close()
     return [
-        {"id": m.id, "email": m.email, "from_name": m.from_name, "verified": m.verified,
+        {"id": m.id, "email": m.email, "from_name": m.from_name, "provider": m.provider,
+         "campaign_id": m.campaign_id, "verified": m.verified,
          "active": m.active, "created_at": m.created_at.isoformat()}
         for m in mailboxes
     ]
@@ -169,7 +234,7 @@ def delete_template(template_id: int):
 # ---------- Contacts / leads ----------
 
 @app.post("/api/contacts/upload-csv", dependencies=[Depends(require_auth)])
-async def upload_contacts_csv(file: UploadFile = File(...)):
+async def upload_contacts_csv(campaign_id: int, file: UploadFile = File(...)):
     """Expected columns: business_name, contact_email, [first_touch_template
     (optional — name of a template; if omitted, auto-rotates across active
     first-touch templates)], plus any extra columns become personalization
@@ -178,7 +243,13 @@ async def upload_contacts_csv(file: UploadFile = File(...)):
     reader = csv.DictReader(io.StringIO(content))
 
     session = get_session()
-    templates_by_name = {t.name: t for t in session.exec(select(Template)).all()}
+
+    campaign = session.get(Campaign, campaign_id)
+    if not campaign:
+        session.close()
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    templates_by_name = {t.name: t for t in session.exec(select(Template).where(Template.campaign_id == campaign_id)).all()}
 
     added, skipped, errors = 0, 0, []
     for row in reader:
@@ -209,6 +280,7 @@ async def upload_contacts_csv(file: UploadFile = File(...)):
 
         contact = Contact(
             business_name=business_name, contact_email=email,
+            campaign_id=campaign_id,
             first_touch_template_id=template_id, extra_info=extra_info,
         )
         session.add(contact)
@@ -227,11 +299,15 @@ def list_contacts(limit: int = 200):
     return contacts
 
 @app.post("/api/contacts/pull-from-sheet", dependencies=[Depends(require_auth)])
-def pull_from_sheet():
-    if not os.getenv("GOOGLE_SHEET_ID"):
-        raise HTTPException(status_code=400, detail="GOOGLE_SHEET_ID is not configured.")
+def pull_from_sheet(campaign_id: int):
+    session = get_session()
+    campaign = session.get(Campaign, campaign_id)
+    session.close()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
     try:
-        added = sheets_sync.pull_leads()
+        added = sheets_sync.pull_leads(campaign)
         return {"added": added}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Sheet pull failed: {e}")
@@ -243,9 +319,13 @@ def pull_from_sheet():
 # ---------- Stats ----------
 
 @app.get("/api/stats", dependencies=[Depends(require_auth)])
-def get_stats():
+def get_stats(campaign_id: Optional[int] = None):
     session = get_session()
-    logs = session.exec(select(SendLog)).all()
+    if campaign_id:
+        statement = select(SendLog).join(Contact, SendLog.contact_id == Contact.id).where(Contact.campaign_id == campaign_id)
+        logs = session.exec(statement).all()
+    else:
+        logs = session.exec(select(SendLog)).all()
     session.close()
 
     total = len(logs)
