@@ -26,7 +26,7 @@ from sqlmodel import select
 from shared.db import init_db, get_session
 from shared.models import Mailbox, Contact, Template, SendLog
 from shared.crypto import decrypt_password
-from shared.utils import utcnow
+from shared.utils import utcnow, ensure_utc
 import mailer
 import sheets_sync
 
@@ -193,7 +193,7 @@ def cmd_followup(limit=None, dry_run=False):
 			continue  # sequence exhausted
 
 		gap_required = followup_templates[step_index].gap_days or 3
-		days_elapsed = (utcnow() - latest.date_sent).days
+		days_elapsed = (utcnow() - ensure_utc(latest.date_sent)).days
 		if days_elapsed < gap_required:
 			continue
 
