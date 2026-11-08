@@ -10,6 +10,15 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///local.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+elif DATABASE_URL.startswith("postgres+psycopg://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres+psycopg://", "postgresql+psycopg://", 1)
+
+# If postgresql+psycopg:// is specified but psycopg (v3) is not installed, fall back to psycopg2
+if DATABASE_URL.startswith("postgresql+psycopg://"):
+    try:
+        import psycopg  # noqa: F401
+    except ImportError:
+        DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
 
 if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith("sqlite:////"):
     relative_path = DATABASE_URL[len("sqlite:///"):]
